@@ -91,7 +91,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const norm = s => s.toLowerCase().trim();
-let owned = new Set();
+let owned = new Set(), ownedCards = [];
 let deck = JSON.parse(localStorage.getItem('deck') || '{"commander":null,"identity":"","cards":[]}');
 let edh = null;
 
@@ -105,7 +105,9 @@ async function loadCollection() {
     owned.add(norm(m[1]));
     owned.add(norm(m[1].split(' // ')[0]));
   }
-  $('status').textContent = `${owned.size} owned names loaded`;
+  $('status').textContent = 'loading card database...';
+  ownedCards = await (await fetch('owned.json')).json();
+  $('status').textContent = `${ownedCards.length} owned cards loaded`;
 }
 
 function save() { localStorage.setItem('deck', JSON.stringify(deck)); }
@@ -131,46 +133,97 @@ function addCard(name) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Owned cards are filtered locally from the bulk database. Fields that depend on the
+// printing (set, price, artist...) or that are not reimplemented here fall back to
+// scanning Scryfall search pages; `local` is null in that case.
 function buildQuery() {
   const v = id => $(id).value.trim();
+  const low = s => (s || '').toLowerCase();
   const quote = x => /[\s()"]/.test(x) ? `"${x.replace(/"/g, '')}"` : x;
   const checked = cls => [...document.querySelectorAll(`.${cls}:checked`)].map(e => e.value);
   const any = terms => terms.length > 1 ? `(${terms.join(' or ')})` : terms[0] || '';
-  const words = (id, key) => v(id).split(/\s+/).filter(Boolean).map(w => w[0] === '-' ? `-${key}:${w.slice(1)}` : `${key}:${w}`);
-  const user = [v('q')];
-  if (v('name')) user.push(`name:${quote(v('name'))}`);
-  if (v('oracle')) user.push(`o:${quote(v('oracle'))}`);
-  user.push(...words('type', 't'));
-  const cols = checked('col').join('');
-  if (cols) user.push(`c${$('cop').value}${cols}`);
-  const cid = checked('cid').join('');
-  if (cid) user.push(`id<=${cid}`);
-  if (v('mana')) user.push(`m:${v('mana').replace(/\s/g, '')}`);
-  if (v('statv') !== '') user.push(`${$('stat').value}${$('statop').value}${v('statv')}`);
-  user.push(any(checked('game').map(g => `game:${g}`)));
-  if ($('fmt').value && $('fop').value !== 'f') user.push(`${$('fop').value}:${$('fmt').value}`);
-  if ($('isCmd').checked) user.push('is:commander');
-  user.push(any(v('set').split(/[\s,]+/).filter(Boolean).map(c => `s:${c}`)));
-  user.push(any(checked('rar').map(r => `r:${r}`)));
-  user.push(...words('crit', 'is'));
-  if (v('price') !== '') user.push(`${$('cur').value}${$('curop').value}${v('price')}`);
-  if (v('artist')) user.push(`a:${quote(v('artist'))}`);
-  if (v('flavor')) user.push(`ft:${quote(v('flavor'))}`);
-  if ($('lang').value) user.push(`lang:${$('lang').value}`);
-  if ($('prefer').value) user.push(`prefer:${$('prefer').value}`);
+  const cmp = (a, op, b) => ({ '=': a === b, '<': a < b, '<=': a <= b, '>': a > b, '>=': a >= b, '!=': a !== b })[op];
+  const setCmp = (have, op, want) => {
+    const sub = [...have].every(x => want.has(x)), sup = [...want].every(x => have.has(x));
+    return op === '=' ? sub && sup : op === '<=' ? sub : sup;
+  };
+  const user = [v('q')], tests = [c => !c.hidden];
+  let local = !v('q');
+  if (v('name')) { user.push(`name:${quote(v('name'))}`); tests.push(c => low(c.name).includes(low(v('name')))); }
+  if (v('oracle')) {
+    user.push(`o:${quote(v('oracle'))}`);
+    // o: skips reminder text; ~ stands for the card's name or "this <object>"
+    const self = /\bthis (artifact|battle|creature|enchantment|land|planeswalker|permanent|spell|card|equipment|aura|vehicle|saga)\b/g;
+    tests.push(c => {
+      let t = low(c.oracle_text).replace(/\([^)]*\)/g, '');
+      for (const n of [c.name, ...c.name.split(' // '), c.name.split(',')[0]]) t = t.replaceAll(low(n), '~');
+      return t.replace(self, '~').includes(low(v('oracle')));
+    });
+  }
+  for (const w of v('type').split(/\s+/).filter(Boolean)) {
+    const neg = w[0] === '-', word = low(neg ? w.slice(1) : w);
+    user.push(`${neg ? '-' : ''}t:${word}`);
+    tests.push(c => low(c.type_line).includes(word) !== neg);
+  }
+  const cols = checked('col');
+  if (cols.length) {
+    const op = $('cop').value, want = new Set(cols.filter(x => x !== 'c'));
+    user.push(`c${op}${cols.join('')}`);
+    tests.push(c => setCmp(new Set(c.colors.map(low)), op, want));
+  }
+  const identity = ids => { const want = new Set(ids.filter(x => x !== 'c')); return c => c.color_identity.every(x => want.has(low(x))); };
+  const cid = checked('cid');
+  if (cid.length) { user.push(`id<=${cid.join('')}`); tests.push(identity(cid)); }
+  if (v('statv') !== '') {
+    const stat = $('stat').value, op = $('statop').value, n = Number(v('statv'));
+    user.push(`${stat}${op}${v('statv')}`);
+    // power/toughness/loyalty hold one value per face; any face may match
+    const vals = c => stat === 'mv' ? [c.cmc] : stat === 'pt' ? c.power.map((p, i) => Number(p) + Number(c.toughness[i]))
+      : ({ pow: c.power, tou: c.toughness, loy: c.loyalty }[stat]).map(Number);
+    tests.push(c => vals(c).some(x => cmp(x, op, n)));
+  }
+  const fmt = $('fmt').value, fop = $('fop').value;
+  if (fmt && fop !== 'f') {
+    user.push(`${fop}:${fmt}`);
+    tests.push(c => c.legalities[fmt] === fop);
+  }
+  if ($('isCmd').checked) {
+    user.push('is:commander');
+    tests.push(c => c.commander);
+  }
+  const remote = [
+    v('mana') && `m:${v('mana').replace(/\s/g, '')}`,
+    any(checked('game').map(g => `game:${g}`)),
+    any(v('set').split(/[\s,]+/).filter(Boolean).map(c => `s:${c}`)),
+    any(checked('rar').map(r => `r:${r}`)),
+    ...v('crit').split(/\s+/).filter(Boolean).map(w => w[0] === '-' ? `-is:${w.slice(1)}` : `is:${w}`),
+    v('price') !== '' && `${$('cur').value}${$('curop').value}${v('price')}`,
+    v('artist') && `a:${quote(v('artist'))}`,
+    v('flavor') && `ft:${quote(v('flavor'))}`,
+    $('lang').value && `lang:${$('lang').value}`,
+    $('prefer').value && `prefer:${$('prefer').value}`,
+  ].filter(Boolean);
+  if (remote.length || $('prints').checked || $('extras').checked) local = false;
+  user.push(...remote);
   const defaults = [];
-  if ($('fmt').value && $('fop').value === 'f') defaults.push(`f:${$('fmt').value}`);
-  if ($('inId').checked && deck.commander) defaults.push(`id<=${deck.identity || 'c'}`);
+  if (fmt && fop === 'f') { defaults.push(`f:${fmt}`); tests.push(c => ['legal', 'restricted'].includes(c.legalities[fmt])); }
+  if ($('inId').checked && deck.commander) { defaults.push(`id<=${deck.identity || 'c'}`); tests.push(identity([...(deck.identity || 'c')])); }
   const u = user.filter(Boolean);
-  return { q: u.concat(defaults).join(' '), hasUser: u.length > 0 };
+  return { q: u.concat(defaults).join(' '), hasUser: u.length > 0, local: local ? c => tests.every(t => t(c)) : null };
 }
+
+const sorters = {
+  name: (a, b) => a.name.localeCompare(b.name),
+  cmc: (a, b) => a.cmc - b.cmc,
+  edhrec: (a, b) => (a.edhrec_rank ?? 1e9) - (b.edhrec_rank ?? 1e9),
+};
 
 let gen = 0;
 const MAX_PAGES = 60, MAX_OTHER = 175;
 
 async function search() {
   const my = ++gen;
-  const { q, hasUser } = buildQuery();
+  const { q, hasUser, local } = buildQuery();
   $('full').textContent = q;
   $('owned').innerHTML = $('other').innerHTML = '';
   let nOwned = 0, nOther = 0;
@@ -178,24 +231,31 @@ async function search() {
   if (!hasUser) { $('status').textContent = ''; return; }
   const params = new URLSearchParams({ q, order: $('order').value, dir: $('dir').value, unique: $('prints').checked ? 'prints' : 'cards', include_extras: $('extras').checked });
   let url = 'https://api.scryfall.com/cards/search?' + params;
+  if (local) {
+    const list = ownedCards.filter(local).sort(sorters[$('order').value] || sorters.edhrec);
+    if ($('dir').value === 'desc') list.reverse();
+    for (const c of list) $('owned').appendChild(cardEl(c));
+    $('nOwned').textContent = nOwned = list.length;
+  }
+  const maxPages = local ? 1 : MAX_PAGES;
   let page = 0, total = 0;
-  while (url && page < MAX_PAGES) {
+  while (url && page < maxPages) {
     $('status').textContent = `loading page ${page + 1}...`;
     const r = await (await fetch(url)).json();
     if (my !== gen) return;
     if (r.object === 'error') { $('status').textContent = r.details; return; }
     total = r.total_cards;
     for (const c of r.data) {
-      if (isOwned(c.name)) { $('owned').appendChild(cardEl(c)); nOwned++; }
+      if (isOwned(c.name)) { if (!local) { $('owned').appendChild(cardEl(c)); nOwned++; } }
       else if (nOther < MAX_OTHER) { $('other').appendChild(cardEl(c)); nOther++; }
     }
     $('nOwned').textContent = nOwned;
     $('nOther').textContent = nOther + (total - nOwned - nOther > 0 ? ` of ${total - nOwned}` : '');
     url = r.has_more ? r.next_page : null;
     page++;
-    if (url) { await sleep(500); if (my !== gen) return; }
+    if (url && page < maxPages) { await sleep(500); if (my !== gen) return; }
   }
-  $('status').textContent = `${total} matches` + (url ? ` (scanned first ${MAX_PAGES} pages for owned cards, refine query)` : '');
+  $('status').textContent = `${total} matches` + (local ? ' (owned: local database)' : url ? ` (scanned first ${MAX_PAGES} pages for owned cards, refine query)` : ' (owned: scanned Scryfall pages)');
 }
 
 let timer;
