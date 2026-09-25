@@ -7,8 +7,9 @@
   body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
   #main { flex: 1; overflow-y: auto; padding: 10px; }
   #side { width: 340px; overflow-y: auto; padding: 10px; border-left: 1px solid #ccc; }
-  #q { width: 60%; }
-  #results { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  #form { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin-bottom: 6px; }
+  #form input[type=text], #form input:not([type]) { width: 220px; }
+  .results { display: flex; flex-wrap: wrap; gap: 6px; }
   .card { width: 146px; cursor: pointer; position: relative; }
   .card img { width: 146px; border-radius: 6px; }
   .card.owned::after { content: "owned"; position: absolute; top: 4px; right: 4px; background: #2a2; color: #fff; font-size: 11px; padding: 1px 4px; }
@@ -22,12 +23,30 @@
 </head>
 <body>
 <div id="main">
-  <input id="q" placeholder="Scryfall query, e.g. id<=bg t:creature">
-  <label><input type="checkbox" id="ownedOnly" checked> owned only</label>
-  <label><input type="checkbox" id="inId" checked> within commander identity</label>
-  <button id="go">Search</button>
-  <span id="status"></span>
-  <div id="results"></div>
+  <div id="form">
+    <input id="q" placeholder="Raw Scryfall query (optional)">
+    <input id="name" placeholder="Name">
+    <input id="oracle" placeholder="Rules text">
+    <input id="type" placeholder="Types, e.g. legendary dinosaur">
+    <span>Colors
+      <select id="cop"><option value=">=">including</option><option value="=">exactly</option><option value="<=">at most</option></select>
+      <label><input type="checkbox" class="col" value="w">W</label>
+      <label><input type="checkbox" class="col" value="u">U</label>
+      <label><input type="checkbox" class="col" value="b">B</label>
+      <label><input type="checkbox" class="col" value="r">R</label>
+      <label><input type="checkbox" class="col" value="g">G</label>
+      <label><input type="checkbox" class="col" value="c">C</label>
+    </span>
+    <span>MV <select id="mvop"><option>=</option><option>&lt;=</option><option>&gt;=</option></select><input id="mv" type="number" min="0" style="width:4em"></span>
+    <label><input type="checkbox" id="legal" checked> commander legal</label>
+    <label><input type="checkbox" id="isCmd"> is commander</label>
+    <label><input type="checkbox" id="inId" checked> within commander identity</label>
+  </div>
+  <code id="full"></code> <span id="status"></span>
+  <h3>Owned (<span id="nOwned">0</span>)</h3>
+  <div id="owned" class="results"></div>
+  <h3>Not owned (<span id="nOther">0</span>)</h3>
+  <div id="other" class="results"></div>
 </div>
 <div id="side">
   <h3>Commander: <span id="cmd">none</span></h3>
@@ -81,31 +100,58 @@ function addCard(name) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function search() {
-  let q = $('q').value.trim();
-  if (!q) return;
-  if ($('inId').checked && deck.commander) q += ` id<=${deck.identity || 'c'}`;
-  const ownedOnly = $('ownedOnly').checked;
-  const maxPages = ownedOnly ? 60 : 1;
-  let url = 'https://api.scryfall.com/cards/search?unique=cards&order=edhrec&q=' + encodeURIComponent(q);
-  const out = [];
-  let page = 0, total = 0;
-  $('results').innerHTML = '';
-  while (url && page < maxPages) {
-    $('status').textContent = `fetching page ${page + 1}...`;
-    const r = await (await fetch(url)).json();
-    if (r.object === 'error') { $('status').textContent = r.details; return; }
-    total = r.total_cards;
-    out.push(...r.data.filter(c => !ownedOnly || isOwned(c.name)));
-    url = r.has_more ? r.next_page : null;
-    page++;
-    if (url) await sleep(100);
-  }
-  $('status').textContent = `${out.length} shown of ${total} matches` + (url ? ` (stopped after ${maxPages} pages, refine query)` : '');
-  for (const c of out) renderCard(c);
+function buildQuery() {
+  const parts = [$('q').value.trim()];
+  const quote = v => /\s/.test(v) ? `"${v}"` : v;
+  if ($('name').value.trim()) parts.push(`name:${quote($('name').value.trim())}`);
+  if ($('oracle').value.trim()) parts.push(`o:${quote($('oracle').value.trim())}`);
+  for (const t of $('type').value.trim().split(/\s+/).filter(Boolean)) parts.push(`t:${t}`);
+  const cols = [...document.querySelectorAll('.col:checked')].map(e => e.value).join('');
+  if (cols) parts.push(`c${$('cop').value}${cols}`);
+  if ($('mv').value !== '') parts.push(`mv${$('mvop').value}${$('mv').value}`);
+  if ($('legal').checked) parts.push('f:commander');
+  if ($('isCmd').checked) parts.push('is:commander');
+  if ($('inId').checked && deck.commander) parts.push(`id<=${deck.identity || 'c'}`);
+  return parts.filter(Boolean).join(' ');
 }
 
-function renderCard(c) {
+let gen = 0;
+const MAX_PAGES = 60, MAX_OTHER = 175;
+
+async function search() {
+  const my = ++gen;
+  const q = buildQuery();
+  $('full').textContent = q;
+  $('owned').innerHTML = $('other').innerHTML = '';
+  let nOwned = 0, nOther = 0;
+  $('nOwned').textContent = $('nOther').textContent = 0;
+  const onlyDefaults = q.split(' ').every(p => ['f:commander', 'is:commander'].includes(p) || p.startsWith('id<='));
+  if (!q || onlyDefaults) { $('status').textContent = ''; return; }
+  let url = 'https://api.scryfall.com/cards/search?unique=cards&order=edhrec&q=' + encodeURIComponent(q);
+  let page = 0, total = 0;
+  while (url && page < MAX_PAGES) {
+    $('status').textContent = `loading page ${page + 1}...`;
+    const r = await (await fetch(url)).json();
+    if (my !== gen) return;
+    if (r.object === 'error') { $('status').textContent = r.details; return; }
+    total = r.total_cards;
+    for (const c of r.data) {
+      if (isOwned(c.name)) { $('owned').appendChild(cardEl(c)); nOwned++; }
+      else if (nOther < MAX_OTHER) { $('other').appendChild(cardEl(c)); nOther++; }
+    }
+    $('nOwned').textContent = nOwned;
+    $('nOther').textContent = nOther + (total - nOwned - nOther > 0 ? ` of ${total - nOwned}` : '');
+    url = r.has_more ? r.next_page : null;
+    page++;
+    if (url) { await sleep(100); if (my !== gen) return; }
+  }
+  $('status').textContent = `${total} matches` + (url ? ` (scanned first ${MAX_PAGES} pages for owned cards, refine query)` : '');
+}
+
+let timer;
+const searchSoon = () => { clearTimeout(timer); timer = setTimeout(search, 400); };
+
+function cardEl(c) {
   const img = c.image_uris?.small || c.card_faces?.[0]?.image_uris?.small;
   const d = document.createElement('div');
   d.className = 'card' + (isOwned(c.name) ? ' owned' : '');
@@ -117,7 +163,7 @@ function renderCard(c) {
     b.onclick = e => { e.stopPropagation(); setCommander(c); };
     d.appendChild(b);
   }
-  $('results').appendChild(d);
+  return d;
 }
 
 function slug(name) {
@@ -130,6 +176,7 @@ async function setCommander(c) {
   deck.identity = c.color_identity.join('').toLowerCase();
   deck.cards = deck.cards.filter(n => n !== c.name);
   save(); renderDeck();
+  searchSoon();
   await loadEdh();
 }
 
@@ -166,8 +213,7 @@ function renderEdh() {
   }
 }
 
-$('go').onclick = search;
-$('q').onkeydown = e => { if (e.key === 'Enter') search(); };
+$('form').oninput = searchSoon;
 $('edhOwned').onchange = renderEdh;
 $('clear').onclick = () => { deck = { commander: null, identity: '', cards: [] }; edh = null; save(); renderDeck(); renderEdh(); };
 $('export').onclick = () => {
