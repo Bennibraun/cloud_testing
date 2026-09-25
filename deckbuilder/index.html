@@ -1,0 +1,181 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Deckbuilder</title>
+<style>
+  body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+  #main { flex: 1; overflow-y: auto; padding: 10px; }
+  #side { width: 340px; overflow-y: auto; padding: 10px; border-left: 1px solid #ccc; }
+  #q { width: 60%; }
+  #results { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .card { width: 146px; cursor: pointer; position: relative; }
+  .card img { width: 146px; border-radius: 6px; }
+  .card.owned::after { content: "owned"; position: absolute; top: 4px; right: 4px; background: #2a2; color: #fff; font-size: 11px; padding: 1px 4px; }
+  .card button { position: absolute; bottom: 8px; left: 4px; font-size: 11px; }
+  li { cursor: pointer; }
+  li.owned { color: #2a2; }
+  li:hover { text-decoration: line-through; }
+  #edhrec li:hover { text-decoration: underline; }
+  h3 { margin: 12px 0 4px; }
+</style>
+</head>
+<body>
+<div id="main">
+  <input id="q" placeholder="Scryfall query, e.g. id<=bg t:creature">
+  <label><input type="checkbox" id="ownedOnly" checked> owned only</label>
+  <label><input type="checkbox" id="inId" checked> within commander identity</label>
+  <button id="go">Search</button>
+  <span id="status"></span>
+  <div id="results"></div>
+</div>
+<div id="side">
+  <h3>Commander: <span id="cmd">none</span></h3>
+  <h3>Deck (<span id="count">0</span>)</h3>
+  <ul id="deck"></ul>
+  <button id="export">Copy decklist</button>
+  <button id="clear">Clear deck</button>
+  <h3>EDHREC <label style="font-weight:normal"><input type="checkbox" id="edhOwned" checked> owned only</label></h3>
+  <div id="edhrec"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const norm = s => s.toLowerCase().trim();
+let owned = new Set();
+let deck = JSON.parse(localStorage.getItem('deck') || '{"commander":null,"identity":"","cards":[]}');
+let edh = null;
+
+const isOwned = name => owned.has(norm(name)) || owned.has(norm(name.split(' // ')[0]));
+
+async function loadCollection() {
+  const txt = await (await fetch('Cards.txt')).text();
+  for (const line of txt.split('\n')) {
+    const m = line.match(/^\s*\d+\s+(.+?)\s+\([^)]+\)/) || line.match(/^\s*\d+\s+(.+?)\s*$/);
+    if (!m) continue;
+    owned.add(norm(m[1]));
+    owned.add(norm(m[1].split(' // ')[0]));
+  }
+  $('status').textContent = `${owned.size} owned names loaded`;
+}
+
+function save() { localStorage.setItem('deck', JSON.stringify(deck)); }
+
+function renderDeck() {
+  $('cmd').textContent = deck.commander || 'none';
+  $('count').textContent = deck.cards.length + (deck.commander ? 1 : 0);
+  $('deck').innerHTML = '';
+  for (const name of [...deck.cards].sort()) {
+    const li = document.createElement('li');
+    li.textContent = name;
+    li.className = isOwned(name) ? 'owned' : '';
+    li.title = 'click to remove';
+    li.onclick = () => { deck.cards = deck.cards.filter(n => n !== name); save(); renderDeck(); renderEdh(); };
+    $('deck').appendChild(li);
+  }
+}
+
+function addCard(name) {
+  if (name !== deck.commander && !deck.cards.includes(name)) deck.cards.push(name);
+  save(); renderDeck(); renderEdh();
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function search() {
+  let q = $('q').value.trim();
+  if (!q) return;
+  if ($('inId').checked && deck.commander) q += ` id<=${deck.identity || 'c'}`;
+  const ownedOnly = $('ownedOnly').checked;
+  const maxPages = ownedOnly ? 60 : 1;
+  let url = 'https://api.scryfall.com/cards/search?unique=cards&order=edhrec&q=' + encodeURIComponent(q);
+  const out = [];
+  let page = 0, total = 0;
+  $('results').innerHTML = '';
+  while (url && page < maxPages) {
+    $('status').textContent = `fetching page ${page + 1}...`;
+    const r = await (await fetch(url)).json();
+    if (r.object === 'error') { $('status').textContent = r.details; return; }
+    total = r.total_cards;
+    out.push(...r.data.filter(c => !ownedOnly || isOwned(c.name)));
+    url = r.has_more ? r.next_page : null;
+    page++;
+    if (url) await sleep(100);
+  }
+  $('status').textContent = `${out.length} shown of ${total} matches` + (url ? ` (stopped after ${maxPages} pages, refine query)` : '');
+  for (const c of out) renderCard(c);
+}
+
+function renderCard(c) {
+  const img = c.image_uris?.small || c.card_faces?.[0]?.image_uris?.small;
+  const d = document.createElement('div');
+  d.className = 'card' + (isOwned(c.name) ? ' owned' : '');
+  d.innerHTML = `<img src="${img}" title="${c.name} (click to add)">`;
+  d.onclick = () => addCard(c.name);
+  if (/Legendary.*Creature|can be your commander/.test(c.type_line + (c.oracle_text || ''))) {
+    const b = document.createElement('button');
+    b.textContent = 'Set commander';
+    b.onclick = e => { e.stopPropagation(); setCommander(c); };
+    d.appendChild(b);
+  }
+  $('results').appendChild(d);
+}
+
+function slug(name) {
+  return name.split(' // ')[0].normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9 -]/g, '').trim().replace(/[\s-]+/g, '-');
+}
+
+async function setCommander(c) {
+  deck.commander = c.name;
+  deck.identity = c.color_identity.join('').toLowerCase();
+  deck.cards = deck.cards.filter(n => n !== c.name);
+  save(); renderDeck();
+  await loadEdh();
+}
+
+async function loadEdh() {
+  edh = null;
+  if (!deck.commander) return renderEdh();
+  $('edhrec').textContent = 'loading...';
+  const r = await fetch('edhrec/' + slug(deck.commander));
+  if (!r.ok) { $('edhrec').textContent = 'EDHREC lookup failed'; return; }
+  edh = (await r.json()).container.json_dict.cardlists;
+  renderEdh();
+}
+
+function renderEdh() {
+  const el = $('edhrec');
+  el.innerHTML = '';
+  if (!edh) return;
+  const ownedOnly = $('edhOwned').checked;
+  for (const list of edh) {
+    const cards = list.cardviews.filter(c => !deck.cards.includes(c.name) && (!ownedOnly || isOwned(c.name)));
+    if (!cards.length) continue;
+    const h = document.createElement('h4');
+    h.textContent = list.header;
+    const ul = document.createElement('ul');
+    for (const c of cards) {
+      const li = document.createElement('li');
+      li.className = isOwned(c.name) ? 'owned' : '';
+      li.textContent = `${c.name} (${Math.round((c.synergy || 0) * 100)}% syn, ${Math.round(100 * c.num_decks / c.potential_decks)}% decks)`;
+      li.title = 'click to add';
+      li.onclick = () => addCard(c.name);
+      ul.appendChild(li);
+    }
+    el.append(h, ul);
+  }
+}
+
+$('go').onclick = search;
+$('q').onkeydown = e => { if (e.key === 'Enter') search(); };
+$('edhOwned').onchange = renderEdh;
+$('clear').onclick = () => { deck = { commander: null, identity: '', cards: [] }; edh = null; save(); renderDeck(); renderEdh(); };
+$('export').onclick = () => {
+  const lines = (deck.commander ? [`1 ${deck.commander}`] : []).concat(deck.cards.sort().map(n => `1 ${n}`));
+  navigator.clipboard.writeText(lines.join('\n'));
+};
+
+loadCollection().then(() => { renderDeck(); loadEdh(); });
+</script>
+</body>
+</html>
