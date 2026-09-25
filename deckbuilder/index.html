@@ -4,45 +4,77 @@
 <meta charset="utf-8">
 <title>Deckbuilder</title>
 <style>
-  body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
-  #main { flex: 1; overflow-y: auto; padding: 10px; }
-  #side { width: 340px; overflow-y: auto; padding: 10px; border-left: 1px solid #ccc; }
-  #form { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin-bottom: 6px; }
-  #form input[type=text], #form input:not([type]) { width: 220px; }
-  .results { display: flex; flex-wrap: wrap; gap: 6px; }
-  .card { width: 146px; cursor: pointer; position: relative; }
-  .card img { width: 146px; border-radius: 6px; }
-  .card.owned::after { content: "owned"; position: absolute; top: 4px; right: 4px; background: #2a2; color: #fff; font-size: 11px; padding: 1px 4px; }
-  .card button { position: absolute; bottom: 8px; left: 4px; font-size: 11px; }
-  li { cursor: pointer; }
-  li.owned { color: #2a2; }
-  li:hover { text-decoration: line-through; }
-  #edhrec li:hover { text-decoration: underline; }
-  h3 { margin: 12px 0 4px; }
+  :root { --bg: #16171a; --panel: #1e1f23; --line: #2e3036; --text: #e4e4e7; --dim: #9a9aa3; --accent: #9b6bff; --own: #3ec46d; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
+  #main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  #side { width: 340px; overflow-y: auto; padding: 16px; background: var(--panel); border-left: 1px solid var(--line); }
+  input, select, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  input[type=checkbox] { accent-color: var(--accent); padding: 0; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; background: var(--panel); }
+  button:hover { border-color: var(--accent); }
+  label { cursor: pointer; white-space: nowrap; }
+  #bar { display: flex; gap: 8px; flex-wrap: wrap; }
+  #bar #q { flex: 2; min-width: 240px; }
+  #bar #name { flex: 1; min-width: 160px; }
+  details { margin-top: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  summary { cursor: pointer; padding: 8px 12px; color: var(--accent); user-select: none; }
+  .grid { display: grid; grid-template-columns: 130px 1fr; gap: 10px 16px; align-items: center; padding: 4px 12px 14px; }
+  .grid > span { color: var(--dim); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .row input:not([type=checkbox]) { width: 260px; }
+  .row input[type=number] { width: 90px; }
+  #querybar { margin: 12px 0 4px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  #full { color: var(--dim); font-size: 12px; }
+  #status { color: var(--accent); font-size: 12px; }
+  h3 { margin: 16px 0 8px; font-size: 15px; font-weight: 600; }
+  h4 { margin: 12px 0 4px; font-size: 13px; color: var(--dim); }
+  .results { display: grid; grid-template-columns: repeat(auto-fill, minmax(146px, 1fr)); gap: 10px; }
+  .card { cursor: pointer; position: relative; transition: transform .1s; }
+  .card:hover { transform: translateY(-3px); }
+  .card img { width: 100%; border-radius: 7px; display: block; }
+  .card.owned::after { content: "owned"; position: absolute; top: 6px; right: 6px; background: var(--own); color: #000; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+  .card button { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 3px 8px; opacity: 0; }
+  .card:hover button { opacity: 1; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+  li:hover { background: var(--bg); }
+  li.owned { color: var(--own); }
+  #deck li:hover { text-decoration: line-through; }
+  #side .buttons { display: flex; gap: 6px; margin-top: 10px; }
 </style>
 </head>
 <body>
 <div id="main">
   <div id="form">
+  <div id="bar">
     <input id="q" placeholder="Raw Scryfall query (optional)">
-    <input id="name" placeholder="Name">
-    <input id="oracle" placeholder="Rules text">
-    <input id="type" placeholder="Types, e.g. legendary dinosaur">
-    <span>Colors
-      <select id="cop"><option value=">=">including</option><option value="=">exactly</option><option value="<=">at most</option></select>
-      <label><input type="checkbox" class="col" value="w">W</label>
-      <label><input type="checkbox" class="col" value="u">U</label>
-      <label><input type="checkbox" class="col" value="b">B</label>
-      <label><input type="checkbox" class="col" value="r">R</label>
-      <label><input type="checkbox" class="col" value="g">G</label>
-      <label><input type="checkbox" class="col" value="c">C</label>
-    </span>
-    <span>MV <select id="mvop"><option>=</option><option>&lt;=</option><option>&gt;=</option></select><input id="mv" type="number" min="0" style="width:4em"></span>
-    <label><input type="checkbox" id="legal" checked> commander legal</label>
-    <label><input type="checkbox" id="isCmd"> is commander</label>
-    <label><input type="checkbox" id="inId" checked> within commander identity</label>
+    <input id="name" placeholder="Card name">
   </div>
-  <code id="full"></code> <span id="status"></span>
+  <details>
+  <summary>Advanced filters</summary>
+  <div class="grid">
+    <span>Rules text</span><div class="row"><input id="oracle" placeholder='e.g. draw a card, ~ for card name'></div>
+    <span>Type line</span><div class="row"><input id="type" placeholder="e.g. legendary dinosaur -human"></div>
+    <span>Colors</span><div class="row"><select id="cop"><option value=">=">including</option><option value="=">exactly</option><option value="<=">at most</option></select><label><input type="checkbox" class="col" value="w"> White</label><label><input type="checkbox" class="col" value="u"> Blue</label><label><input type="checkbox" class="col" value="b"> Black</label><label><input type="checkbox" class="col" value="r"> Red</label><label><input type="checkbox" class="col" value="g"> Green</label><label><input type="checkbox" class="col" value="c"> Colorless</label></div>
+    <span>Color identity</span><div class="row"><label><input type="checkbox" class="cid" value="w"> White</label><label><input type="checkbox" class="cid" value="u"> Blue</label><label><input type="checkbox" class="cid" value="b"> Black</label><label><input type="checkbox" class="cid" value="r"> Red</label><label><input type="checkbox" class="cid" value="g"> Green</label><label><input type="checkbox" class="cid" value="c"> Colorless</label><label><input type="checkbox" id="inId" checked> within deck commander</label></div>
+    <span>Mana cost</span><div class="row"><input id="mana" placeholder="e.g. 2WW or {2/G}{G}"></div>
+    <span>Stats</span><div class="row"><select id="stat"><option value="mv">Mana value</option><option value="pow">Power</option><option value="tou">Toughness</option><option value="pt">Power + toughness</option><option value="loy">Loyalty</option></select><select id="statop"><option value="=">=</option><option value="<">&lt;</option><option value="<=">&le;</option><option value=">">&gt;</option><option value=">=">&ge;</option><option value="!=">&ne;</option></select><input id="statv" type="number" min="0"></div>
+    <span>Games</span><div class="row"><label><input type="checkbox" class="game" value="paper"> Paper</label><label><input type="checkbox" class="game" value="arena"> Arena</label><label><input type="checkbox" class="game" value="mtgo"> Magic Online</label></div>
+    <span>Format</span><div class="row"><select id="fop"><option value="f">Legal</option><option value="banned">Banned</option><option value="restricted">Restricted</option></select><select id="fmt"><option value="">any</option><option value="commander" selected>commander</option><option value="standard">standard</option><option value="future">future</option><option value="pioneer">pioneer</option><option value="modern">modern</option><option value="legacy">legacy</option><option value="vintage">vintage</option><option value="pauper">pauper</option><option value="paupercommander">paupercommander</option><option value="oathbreaker">oathbreaker</option><option value="brawl">brawl</option><option value="standardbrawl">standardbrawl</option><option value="historic">historic</option><option value="timeless">timeless</option><option value="alchemy">alchemy</option><option value="explorer">explorer</option><option value="gladiator">gladiator</option><option value="penny">penny</option><option value="duel">duel</option><option value="oldschool">oldschool</option><option value="premodern">premodern</option><option value="predh">predh</option></select><label><input type="checkbox" id="isCmd"> can be commander</label></div>
+    <span>Sets</span><div class="row"><input id="set" list="sets" placeholder="set codes, e.g. war mh3"><datalist id="sets"></datalist></div>
+    <span>Rarity</span><div class="row"><label><input type="checkbox" class="rar" value="common"> Common</label><label><input type="checkbox" class="rar" value="uncommon"> Uncommon</label><label><input type="checkbox" class="rar" value="rare"> Rare</label><label><input type="checkbox" class="rar" value="mythic"> Mythic</label></div>
+    <span>Criteria</span><div class="row"><input id="crit" placeholder="is: values, e.g. fetchland -reprint"></div>
+    <span>Price</span><div class="row"><select id="cur"><option value="usd">USD</option><option value="eur">EUR</option><option value="tix">TIX</option></select><select id="curop"><option value="=">=</option><option value="<">&lt;</option><option value="<=">&le;</option><option value=">">&gt;</option><option value=">=">&ge;</option><option value="!=">&ne;</option></select><input id="price" type="number" min="0" step="0.01"></div>
+    <span>Artist</span><div class="row"><input id="artist" placeholder="e.g. Magali"></div>
+    <span>Flavor text</span><div class="row"><input id="flavor" placeholder="e.g. Kjeldoran"></div>
+    <span>Language</span><div class="row"><select id="lang"><option value="">default</option><option value="any">any</option><option value="en">English</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="ja">Japanese</option><option value="ko">Korean</option><option value="ru">Russian</option><option value="zhs">Simplified Chinese</option><option value="zht">Traditional Chinese</option></select></div>
+    <span>Preferences</span><div class="row"><select id="order"><option value="edhrec">Sort by edhrec</option><option value="name">Sort by name</option><option value="cmc">Sort by cmc</option><option value="power">Sort by power</option><option value="toughness">Sort by toughness</option><option value="color">Sort by color</option><option value="rarity">Sort by rarity</option><option value="usd">Sort by usd</option><option value="eur">Sort by eur</option><option value="tix">Sort by tix</option><option value="released">Sort by released</option><option value="set">Sort by set</option><option value="artist">Sort by artist</option><option value="penny">Sort by penny</option><option value="review">Sort by review</option></select><select id="dir"><option value="auto">auto</option><option value="asc">ascending</option><option value="desc">descending</option></select><select id="prefer"><option value="">prefer no preference</option><option value="oldest">prefer oldest</option><option value="newest">prefer newest</option><option value="usd-low">prefer usd-low</option><option value="usd-high">prefer usd-high</option><option value="promo">prefer promo</option><option value="default">prefer default</option><option value="atypical">prefer atypical</option><option value="ub">prefer ub</option><option value="notub">prefer notub</option></select><label><input type="checkbox" id="prints"> all prints</label><label><input type="checkbox" id="extras"> include extras</label></div>
+  </div>
+  </details>
+  </div>
+  <div id="querybar"><code id="full"></code><span id="status"></span></div>
   <h3>Owned (<span id="nOwned">0</span>)</h3>
   <div id="owned" class="results"></div>
   <h3>Not owned (<span id="nOther">0</span>)</h3>
@@ -52,8 +84,7 @@
   <h3>Commander: <span id="cmd">none</span></h3>
   <h3>Deck (<span id="count">0</span>)</h3>
   <ul id="deck"></ul>
-  <button id="export">Copy decklist</button>
-  <button id="clear">Clear deck</button>
+  <div class="buttons"><button id="export">Copy decklist</button><button id="clear">Clear deck</button></div>
   <h3>EDHREC <label style="font-weight:normal"><input type="checkbox" id="edhOwned" checked> owned only</label></h3>
   <div id="edhrec"></div>
 </div>
@@ -101,18 +132,37 @@ function addCard(name) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function buildQuery() {
-  const parts = [$('q').value.trim()];
-  const quote = v => /\s/.test(v) ? `"${v}"` : v;
-  if ($('name').value.trim()) parts.push(`name:${quote($('name').value.trim())}`);
-  if ($('oracle').value.trim()) parts.push(`o:${quote($('oracle').value.trim())}`);
-  for (const t of $('type').value.trim().split(/\s+/).filter(Boolean)) parts.push(`t:${t}`);
-  const cols = [...document.querySelectorAll('.col:checked')].map(e => e.value).join('');
-  if (cols) parts.push(`c${$('cop').value}${cols}`);
-  if ($('mv').value !== '') parts.push(`mv${$('mvop').value}${$('mv').value}`);
-  if ($('legal').checked) parts.push('f:commander');
-  if ($('isCmd').checked) parts.push('is:commander');
-  if ($('inId').checked && deck.commander) parts.push(`id<=${deck.identity || 'c'}`);
-  return parts.filter(Boolean).join(' ');
+  const v = id => $(id).value.trim();
+  const quote = x => /[\s()"]/.test(x) ? `"${x.replace(/"/g, '')}"` : x;
+  const checked = cls => [...document.querySelectorAll(`.${cls}:checked`)].map(e => e.value);
+  const any = terms => terms.length > 1 ? `(${terms.join(' or ')})` : terms[0] || '';
+  const words = (id, key) => v(id).split(/\s+/).filter(Boolean).map(w => w[0] === '-' ? `-${key}:${w.slice(1)}` : `${key}:${w}`);
+  const user = [v('q')];
+  if (v('name')) user.push(`name:${quote(v('name'))}`);
+  if (v('oracle')) user.push(`o:${quote(v('oracle'))}`);
+  user.push(...words('type', 't'));
+  const cols = checked('col').join('');
+  if (cols) user.push(`c${$('cop').value}${cols}`);
+  const cid = checked('cid').join('');
+  if (cid) user.push(`id<=${cid}`);
+  if (v('mana')) user.push(`m:${v('mana').replace(/\s/g, '')}`);
+  if (v('statv') !== '') user.push(`${$('stat').value}${$('statop').value}${v('statv')}`);
+  user.push(any(checked('game').map(g => `game:${g}`)));
+  if ($('fmt').value && $('fop').value !== 'f') user.push(`${$('fop').value}:${$('fmt').value}`);
+  if ($('isCmd').checked) user.push('is:commander');
+  user.push(any(v('set').split(/[\s,]+/).filter(Boolean).map(c => `s:${c}`)));
+  user.push(any(checked('rar').map(r => `r:${r}`)));
+  user.push(...words('crit', 'is'));
+  if (v('price') !== '') user.push(`${$('cur').value}${$('curop').value}${v('price')}`);
+  if (v('artist')) user.push(`a:${quote(v('artist'))}`);
+  if (v('flavor')) user.push(`ft:${quote(v('flavor'))}`);
+  if ($('lang').value) user.push(`lang:${$('lang').value}`);
+  if ($('prefer').value) user.push(`prefer:${$('prefer').value}`);
+  const defaults = [];
+  if ($('fmt').value && $('fop').value === 'f') defaults.push(`f:${$('fmt').value}`);
+  if ($('inId').checked && deck.commander) defaults.push(`id<=${deck.identity || 'c'}`);
+  const u = user.filter(Boolean);
+  return { q: u.concat(defaults).join(' '), hasUser: u.length > 0 };
 }
 
 let gen = 0;
@@ -120,14 +170,14 @@ const MAX_PAGES = 60, MAX_OTHER = 175;
 
 async function search() {
   const my = ++gen;
-  const q = buildQuery();
+  const { q, hasUser } = buildQuery();
   $('full').textContent = q;
   $('owned').innerHTML = $('other').innerHTML = '';
   let nOwned = 0, nOther = 0;
   $('nOwned').textContent = $('nOther').textContent = 0;
-  const onlyDefaults = q.split(' ').every(p => ['f:commander', 'is:commander'].includes(p) || p.startsWith('id<='));
-  if (!q || onlyDefaults) { $('status').textContent = ''; return; }
-  let url = 'https://api.scryfall.com/cards/search?unique=cards&order=edhrec&q=' + encodeURIComponent(q);
+  if (!hasUser) { $('status').textContent = ''; return; }
+  const params = new URLSearchParams({ q, order: $('order').value, dir: $('dir').value, unique: $('prints').checked ? 'prints' : 'cards', include_extras: $('extras').checked });
+  let url = 'https://api.scryfall.com/cards/search?' + params;
   let page = 0, total = 0;
   while (url && page < MAX_PAGES) {
     $('status').textContent = `loading page ${page + 1}...`;
@@ -143,7 +193,7 @@ async function search() {
     $('nOther').textContent = nOther + (total - nOwned - nOther > 0 ? ` of ${total - nOwned}` : '');
     url = r.has_more ? r.next_page : null;
     page++;
-    if (url) { await sleep(100); if (my !== gen) return; }
+    if (url) { await sleep(500); if (my !== gen) return; }
   }
   $('status').textContent = `${total} matches` + (url ? ` (scanned first ${MAX_PAGES} pages for owned cards, refine query)` : '');
 }
@@ -221,6 +271,9 @@ $('export').onclick = () => {
   navigator.clipboard.writeText(lines.join('\n'));
 };
 
+fetch('https://api.scryfall.com/sets').then(r => r.json()).then(r => {
+  for (const x of r.data) { const o = document.createElement('option'); o.value = x.code; o.label = x.name; $('sets').appendChild(o); }
+});
 loadCollection().then(() => { renderDeck(); loadEdh(); });
 </script>
 </body>
