@@ -1,15 +1,93 @@
 #!/usr/bin/env python3
-"""Static file server plus an EDHREC proxy (EDHREC sends no CORS headers)."""
+"""Static file server, EDHREC proxy (EDHREC sends no CORS headers), and owned-card
+lookup against Scryfall's oracle bulk data, re-downloaded when over a week old."""
+import gzip
 import http.server
+import json
+import pathlib
 import re
 import sys
+import time
+import urllib.parse
 import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+HERE = pathlib.Path(__file__).parent
+DB = HERE / "cards-db.json"
+MAX_AGE = 7 * 86400
+HEADERS = {"User-Agent": "deckbuilder/1.0", "Accept": "application/json"}
+db, db_mtime = [], 0
+
+
+def get(url):
+    return urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=120)
+
+
+def search_names(q):
+    """All card names matching a Scryfall search (search endpoint allows 2 requests/s)."""
+    names, url = set(), "https://api.scryfall.com/cards/search?q=" + urllib.parse.quote(q)
+    while url:
+        page = json.load(get(url))
+        names.update(c["name"] for c in page["data"])
+        url = page.get("next_page")
+        time.sleep(0.5)
+    return names
+
+
+def hidden(c):
+    """Cards Scryfall search leaves out unless asked (checked against search results)."""
+    return c["set_type"] in ("memorabilia", "token", "alchemy") or "playtest" in c.get("promo_types", [])
+
+
+def slim(c, commanders):
+    faces = c.get("card_faces") or [c]
+    f = lambda k: c.get(k) or faces[0].get(k)
+    stat = lambda k: [x[k] for x in [c, *faces] if x.get(k) is not None]
+    return {
+        "name": c["name"],
+        "cmc": c.get("cmc", 0),
+        "type_line": c.get("type_line", ""),
+        "oracle_text": c.get("oracle_text") or "\n".join(x.get("oracle_text", "") for x in faces),
+        "colors": c.get("colors") or sorted({col for x in faces for col in x.get("colors", [])}),
+        "color_identity": c["color_identity"],
+        "power": stat("power"), "toughness": stat("toughness"), "loyalty": stat("loyalty"),
+        "commander": c["name"] in commanders,
+        "hidden": hidden(c),
+        "legalities": c["legalities"],
+        "edhrec_rank": c.get("edhrec_rank"),
+        "image_uris": {"small": (f("image_uris") or {}).get("small")},
+    }
+
+
+def load_db():
+    global db, db_mtime
+    if not DB.exists() or time.time() - DB.stat().st_mtime > MAX_AGE:
+        print("downloading Scryfall oracle bulk data...", flush=True)
+        commanders = search_names("is:commander")
+        meta = json.load(get("https://api.scryfall.com/bulk-data/oracle-cards"))
+        with get(meta["jsonl_download_uri"]) as r, gzip.open(r, "rt", encoding="utf-8") as lines:
+            cards = [slim(c, commanders) for c in map(json.loads, lines) if c["layout"] != "art_series"]
+        tmp = DB.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cards))
+        tmp.replace(DB)
+    if DB.stat().st_mtime != db_mtime:
+        db, db_mtime = json.loads(DB.read_text()), DB.stat().st_mtime
+
+
+def owned_cards():
+    load_db()
+    names = set()
+    for line in (HERE / "Cards.txt").read_text().splitlines():
+        m = re.match(r"^\s*\d+\s+(.+?)\s+\([^)]+\)", line) or re.match(r"^\s*\d+\s+(.+?)\s*$", line)
+        if m:
+            names.add(m.group(1).lower().strip())
+    return [c for c in db if c["name"].lower() in names or c["name"].split(" // ")[0].lower() in names]
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/owned.json":
+            return self.send(200, json.dumps(owned_cards()).encode())
         m = re.fullmatch(r"/edhrec/([a-z0-9-]+)", self.path)
         if not m:
             return super().do_GET()
@@ -18,14 +96,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             req = urllib.request.Request(url, headers={"User-Agent": "deckbuilder"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 body = r.read()
-            self.send_response(200)
         except Exception as e:
-            body = str(e).encode()
-            self.send_response(502)
+            return self.send(502, str(e).encode())
+        self.send(200, body)
+
+    def send(self, code, body):
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
 
+load_db()
 http.server.ThreadingHTTPServer(("", PORT), Handler).serve_forever()
